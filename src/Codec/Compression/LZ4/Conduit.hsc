@@ -481,22 +481,24 @@ compressWithOutBufferSize bufferSize =
           let outBufLen = outBufferSize - remainingCapacity + footerWritten
           yieldOutBuf outBufLen
 
+        writeFooter remainingCapacity = do
+          -- Done, write footer.
+
+          -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
+          -- see docs of LZ4F_compressBound() for that.
+          footerSize <- liftIO $ lz4fCompressBound 0 prefs
+
+          if remainingCapacity >= footerSize
+            then do
+              writeFooterAndYield remainingCapacity
+            else do
+              -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
+              yieldOutBuf (outBufferSize - remainingCapacity)
+              writeFooterAndYield outBufferSize
+
     let loop remainingCapacity = do
           await >>= \case
-            Nothing -> do
-              -- Done, write footer.
-
-              -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
-              -- see docs of LZ4F_compressBound() for that.
-              footerSize <- liftIO $ lz4fCompressBound 0 prefs
-
-              if remainingCapacity >= footerSize
-                then do
-                  writeFooterAndYield remainingCapacity
-                else do
-                  -- Footer doesn't fit: Yield buffer, put footer into now-free buffer
-                  yieldOutBuf (outBufferSize - remainingCapacity)
-                  writeFooterAndYield outBufferSize
+            Nothing -> return remainingCapacity
 
             Just bs -> do
               let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
@@ -531,7 +533,8 @@ compressWithOutBufferSize bufferSize =
           let newRemainingCapacity = remainingCapacity - written
           return newRemainingCapacity
 
-    loop (outBufferSize - headerSize)
+    cap <- loop (outBufferSize - headerSize)
+    writeFooter cap
 
 
 
