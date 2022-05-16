@@ -90,6 +90,7 @@ module Codec.Compression.LZ4.Conduit
   ) where
 
 import           UnliftIO.Exception (throwString, bracket)
+import qualified Conduit as Conduit
 import           Control.Monad (foldM, when)
 import           Control.Monad.IO.Unlift (MonadUnliftIO)
 import           Control.Monad.IO.Class (liftIO)
@@ -333,9 +334,12 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
 -- an arbitrarily large amount of input data, as long as the destination
 -- buffer is large enough.
 
-
 compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-compress = compressWithOutBufferSize 0
+compress = Conduit.mapC Chunk .| compressWithOutBufferSize 0
+
+-- Force frames
+--compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
+--compress = Conduit.chunksOfCE 100000 .| awaitForever (\b -> yield (Chunk b) >> yield Flush) .| compressWithOutBufferSize 0
 
 
 withLz4CtxAndPrefsConduit ::
@@ -455,7 +459,7 @@ bsChunksOf chunkSize bs
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
 -- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
-compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT ByteString ByteString m ()
+compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT (Flush ByteString) ByteString m ()
 compressWithOutBufferSize bufferSize =
   withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
 
@@ -472,8 +476,6 @@ compressWithOutBufferSize bufferSize =
     let yieldOutBuf outBufLen = do
           outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral outBufLen)
           yield outBs
-
-    headerSize <- withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
 
     let writeFooterAndYield remainingCapacity = do
           let offset = fromIntegral $ outBufferSize - remainingCapacity
@@ -498,12 +500,13 @@ compressWithOutBufferSize bufferSize =
 
     let loop remainingCapacity = do
           await >>= \case
-            Nothing -> return remainingCapacity
+            Nothing -> return . Left $ remainingCapacity
 
-            Just bs -> do
+            Just (Chunk bs) -> do
               let bss = bsChunksOf (fromIntegral bsInChunkSize) bs
               newRemainingCapacity <- foldM compressSingleBs remainingCapacity bss
               loop newRemainingCapacity
+            Just (Flush) -> return . Right $ remainingCapacity
 
         compressSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
         compressSingleBs remainingCapacity bs
@@ -533,8 +536,16 @@ compressWithOutBufferSize bufferSize =
           let newRemainingCapacity = remainingCapacity - written
           return newRemainingCapacity
 
-    cap <- loop (outBufferSize - headerSize)
-    writeFooter cap
+    let writeFrame = do
+          headerSize <- withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
+          cap <- loop (outBufferSize - headerSize)
+          case cap of
+            Left c -> writeFooter c
+            Right c -> Conduit.peekC >>= \case
+              Nothing -> writeFooter c
+              Just _ -> writeFooter c >> writeFrame
+
+    writeFrame
 
 
 
