@@ -1,11 +1,13 @@
+{}:
 with (import <nixpkgs> {});
+
 let
-  # Needs NUR from https://github.com/nix-community/NUR
-  ghc = nur.repos.mpickering.ghc.ghc865; # Keep in sync with the GHC version defined by stack.yaml!
+  mkDependencies = import ./nix/haskell-dependencies.nix;
 in
   haskell.lib.buildStackProject {
-    inherit ghc;
-    name = "myEnv";
+    name = "lz4-frame-conduit-stack";
+
+    ghc = haskellPackages.ghcWithHoogle mkDependencies;
 
     # System dependencies used at build-time go in here.
     nativeBuildInputs = [
