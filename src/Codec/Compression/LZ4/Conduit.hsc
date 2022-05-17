@@ -335,7 +335,13 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
 -- buffer is large enough.
 
 compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-compress = Conduit.mapC Chunk .| compressWithOutBufferSize 0
+compress = Conduit.mapC Chunk .| compressWithOutBufferSize 0 .| stripFlush
+
+stripFlush :: Monad m => ConduitT (Flush a) a m ()
+stripFlush = awaitForever $ \case
+  Chunk a -> yield a
+  Flush -> return ()
+
 
 -- Force frames
 --compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
@@ -459,7 +465,7 @@ bsChunksOf chunkSize bs
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
 -- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
-compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT (Flush ByteString) ByteString m ()
+compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT (Flush ByteString) (Flush ByteString) m ()
 compressWithOutBufferSize bufferSize =
   withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
 
@@ -473,9 +479,14 @@ compressWithOutBufferSize bufferSize =
 
     outBuf <- liftIO $ mallocForeignPtrBytes (fromIntegral outBufferSize)
     let withOutBuf f = liftIO $ withForeignPtr outBuf f
+
     let yieldOutBuf outBufLen = do
           outBs <- withOutBuf $ \buf -> packCStringLen (buf, fromIntegral outBufLen)
-          yield outBs
+          yield (Chunk outBs)
+
+    let writeHeader = do
+          yield Flush
+          withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
 
     let writeFooterAndYield remainingCapacity = do
           let offset = fromIntegral $ outBufferSize - remainingCapacity
@@ -484,8 +495,6 @@ compressWithOutBufferSize bufferSize =
           yieldOutBuf outBufLen
 
         writeFooter remainingCapacity = do
-          -- Done, write footer.
-
           -- Passing srcSize==0 provides bound for LZ4F_compressEnd(),
           -- see docs of LZ4F_compressBound() for that.
           footerSize <- liftIO $ lz4fCompressBound 0 prefs
@@ -508,7 +517,7 @@ compressWithOutBufferSize bufferSize =
               loop newRemainingCapacity
             Just (Flush) -> return . Right $ remainingCapacity
 
-        compressSingleBs :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        compressSingleBs :: CSize -> ByteString -> ConduitM i (Flush ByteString) m CSize
         compressSingleBs remainingCapacity bs
           | remainingCapacity < compressBound = do
               -- Not enough space in outBuf to guarantee that the next call
@@ -519,7 +528,7 @@ compressWithOutBufferSize bufferSize =
           | otherwise = do
               compressSingleBsFitting remainingCapacity bs
 
-        compressSingleBsFitting :: CSize -> ByteString -> ConduitM i ByteString m CSize
+        compressSingleBsFitting :: CSize -> ByteString -> ConduitM i (Flush ByteString) m CSize
         compressSingleBsFitting remainingCapacity bs = do
           when (remainingCapacity < compressBound) $ error "precondition violated"
 
@@ -537,8 +546,9 @@ compressWithOutBufferSize bufferSize =
           return newRemainingCapacity
 
     let writeFrame = do
-          headerSize <- withOutBuf $ \buf -> lz4fCompressBegin ctx prefs buf outBufferSize
+          headerSize <- writeHeader
           cap <- loop (outBufferSize - headerSize)
+          -- TODO extract write footer
           case cap of
             Left c -> writeFooter c
             Right c -> Conduit.peekC >>= \case
