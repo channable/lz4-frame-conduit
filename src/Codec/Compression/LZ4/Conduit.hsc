@@ -69,6 +69,7 @@ module Codec.Compression.LZ4.Conduit
   , lz4DefaultPreferences
 
   , compress
+  , compressMultiFrame
   , compressYieldImmediately
   , compressWithOutBufferSize
 
@@ -103,7 +104,7 @@ import qualified Data.ByteString.Char8 as BS8
 import qualified Data.ByteString.Lazy as BSL
 import           Data.Conduit
 import qualified Data.Conduit.Binary as CB
-import           Data.Monoid ((<>))
+import           UnliftIO.IORef (newIORef, readIORef, modifyIORef')
 import           Foreign.C.Types (CChar, CSize)
 import           Foreign.ForeignPtr (ForeignPtr, addForeignPtrFinalizer, mallocForeignPtr, mallocForeignPtrBytes, finalizeForeignPtr, withForeignPtr)
 import           Foreign.Marshal.Alloc (alloca, allocaBytes, malloc, free)
@@ -116,6 +117,8 @@ import qualified Language.C.Inline as C
 import qualified Language.C.Inline.Context as C
 import qualified Language.C.Inline.Unsafe as CUnsafe
 import           Text.RawString.QQ
+
+import Debug.Trace
 
 import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_dctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), BlockChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
 
@@ -333,7 +336,8 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
 -- So we don't need to loop around LZ4F_compressUpdate() to compress
 -- an arbitrarily large amount of input data, as long as the destination
 -- buffer is large enough.
-
+--
+-- @compress@ compresses the incoming ByteString and puts it all in a single frame.
 compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
 compress = Conduit.mapC Chunk .| compressWithOutBufferSize 0 .| stripFlush
 
@@ -341,6 +345,23 @@ stripFlush :: Monad m => ConduitT (Flush a) a m ()
 stripFlush = awaitForever $ \case
   Chunk a -> yield a
   Flush -> return ()
+
+-- | @compressMultiFrame@ allows to use to determine where a Frame ends by issueing a @Flush@.
+-- The ByteStrings themselves are wrapped in a Chunk
+-- The return value are the offsets that point to the start of each header in the (folded) ByteString.
+compressMultiFrame :: (MonadUnliftIO m, MonadResource m) => ConduitT (Flush ByteString) ByteString m [Int]
+compressMultiFrame = do
+  counterRef <- newIORef 0
+  offsetsRef <- newIORef []
+  compressWithOutBufferSize 0 .| awaitForever (\case
+    Flush -> do
+      count <- readIORef counterRef
+      modifyIORef' offsetsRef (count:)
+    Chunk bs -> do
+      modifyIORef' counterRef (BS.length bs +)
+      yield bs)
+  offsets <- readIORef offsetsRef
+  return (reverse offsets)
 
 
 -- Force frames
