@@ -72,6 +72,7 @@ module Codec.Compression.LZ4.Conduit
   , compressMultiFrame
   , compressYieldImmediately
   , compressWithOutBufferSize
+  , compressWithOutBufferSizeMultiFrame
 
   , decompress
 
@@ -117,8 +118,6 @@ import qualified Language.C.Inline as C
 import qualified Language.C.Inline.Context as C
 import qualified Language.C.Inline.Unsafe as CUnsafe
 import           Text.RawString.QQ
-
-import Debug.Trace
 
 import           Codec.Compression.LZ4.CTypes (LZ4F_cctx, LZ4F_dctx, lz4FrameTypesTable, Lz4FrameException(..), BlockSizeID(..), BlockMode(..), ContentChecksum(..), BlockChecksum(..), FrameType(..), FrameInfo(..), Preferences(..))
 
@@ -337,14 +336,9 @@ lz4fCompressEnd (ScopedLz4FrameCompressionContext ctx) footerBuf footerBufLen = 
 -- an arbitrarily large amount of input data, as long as the destination
 -- buffer is large enough.
 --
--- @compress@ compresses the incoming ByteString and puts it all in a single frame.
+-- @compress@ compresses the incoming ByteString streams and puts it all in a single LZ4 frame.
 compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
-compress = Conduit.mapC Chunk .| compressWithOutBufferSize 0 .| stripFlush
-
-stripFlush :: Monad m => ConduitT (Flush a) a m ()
-stripFlush = awaitForever $ \case
-  Chunk a -> yield a
-  Flush -> return ()
+compress = compressWithOutBufferSize 0
 
 -- | @compressMultiFrame@ allows to use to determine where a Frame ends by issueing a @Flush@.
 -- The ByteStrings themselves are wrapped in a Chunk
@@ -353,7 +347,7 @@ compressMultiFrame :: (MonadUnliftIO m, MonadResource m) => ConduitT (Flush Byte
 compressMultiFrame = do
   counterRef <- newIORef 0
   offsetsRef <- newIORef []
-  compressWithOutBufferSize 0 .| awaitForever (\case
+  compressWithOutBufferSizeMultiFrame 0 .| awaitForever (\case
     Flush -> do
       count <- readIORef counterRef
       modifyIORef' offsetsRef (count:)
@@ -486,8 +480,18 @@ bsChunksOf chunkSize bs
 -- Setting `bufferSize = 0` is the legitimate way to set the output buffer
 -- size to be the minimum required to compress 16 KB inputs and is still a
 -- fast default.
-compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT (Flush ByteString) (Flush ByteString) m ()
-compressWithOutBufferSize bufferSize =
+
+compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT ByteString ByteString m ()
+compressWithOutBufferSize bufferSize = Conduit.mapC Chunk .| compressWithOutBufferSizeMultiFrame bufferSize .| stripFlush
+
+stripFlush :: Monad m => ConduitT (Flush a) a m ()
+stripFlush = awaitForever $ \case
+  Chunk a -> yield a
+  Flush -> return ()
+
+
+compressWithOutBufferSizeMultiFrame :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT (Flush ByteString) (Flush ByteString) m ()
+compressWithOutBufferSizeMultiFrame bufferSize =
   withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
 
     -- We split any incoming ByteString into chunks of this size, so that
