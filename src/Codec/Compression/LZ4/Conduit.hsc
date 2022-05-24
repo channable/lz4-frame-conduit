@@ -477,14 +477,15 @@ bsChunksOf chunkSize bs
 -- fast default.
 
 compressWithOutBufferSize :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT ByteString ByteString m ()
-compressWithOutBufferSize bufferSize = Conduit.mapC Chunk .| compressWithOutBufferSizeMultiFrame bufferSize .| stripFlush
+compressWithOutBufferSize bufferSize = Conduit.mapC Chunk .| compressWithOutBufferSizeMultiFrame bufferSize .| ignoreFlush
 
-stripFlush :: Monad m => ConduitT (Flush a) a m ()
-stripFlush = awaitForever $ \case
+ignoreFlush :: Monad m => ConduitT (Flush a) a m ()
+ignoreFlush = awaitForever $ \case
   Chunk a -> yield a
   Flush -> return ()
 
-
+-- | For the incoming stream the Flush denotes the end of a frame.
+-- For the outgoing stream the Flush denotes the start of a frame.
 compressWithOutBufferSizeMultiFrame :: forall m . (MonadUnliftIO m, MonadResource m) => CSize -> ConduitT (Flush ByteString) (Flush ByteString) m ()
 compressWithOutBufferSizeMultiFrame bufferSize =
   withLz4CtxAndPrefsConduit $ \(ctx, prefs) -> do
