@@ -358,11 +358,6 @@ compressMultiFrame = do
   return (reverse offsets)
 
 
--- Force frames
---compress :: (MonadUnliftIO m, MonadResource m) => ConduitT ByteString ByteString m ()
---compress = Conduit.chunksOfCE 100000 .| awaitForever (\b -> yield (Chunk b) >> yield Flush) .| compressWithOutBufferSize 0
-
-
 withLz4CtxAndPrefsConduit ::
   (MonadUnliftIO m, MonadResource m)
   => ((ScopedLz4FrameCompressionContext, ScopedLz4FramePreferencesPtr) -> ConduitT i o m r)
